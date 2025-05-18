@@ -1,0 +1,213 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+setwd("C:/Users/Samuel/Downloads/GSE84133_raw")
+library(dplyr)
+```
+
+
+```{r}
+
+data_dir <- "C:/Users/Samuel/Downloads/GSE84133_raw"
+gz_files <- list.files(data_dir, pattern = "\\.csv\\.gz$", full.names = TRUE)
+data_list <- list()
+for (f in gz_files) {
+  tmp_csv <- tempfile(fileext = ".csv")
+  
+  R.utils::gunzip(f, destname = tmp_csv, overwrite = TRUE, remove = FALSE)
+
+  df <- read.csv(tmp_csv, row.names = 1)
+  
+  data_list[[basename(f)]] <- df
+}
+
+str(data_list[[1]])
+
+```
+
+### combinding
+```{r}
+
+expression_list <- list()
+metadata_list <- list()
+all_genes <- c()
+
+for (file_name in names(data_list)) {
+  df <- data_list[[file_name]]
+  
+  # Step 1: unique barcode
+  df <- df[!duplicated(df$barcode), ]
+  
+  # Step 2: get batch name
+  batch_id <- sub(".*_(human\\d+|mouse\\d+)_umifm.*", "\\1", file_name)
+  
+  # Step 3: create unique cell_id
+  unique_cell_ids <- paste0(batch_id, "-", df$barcode)
+  
+  # Step 4: create metadata 
+  meta <- data.frame(
+    cell_id = unique_cell_ids,
+    cell_type = df$assigned_cluster,
+    batch = batch_id,
+    stringsAsFactors = FALSE
+  )
+  
+  expr <- df[, !(colnames(df) %in% c("barcode", "assigned_cluster"))]
+  rownames(expr) <- unique_cell_ids
+  
+  
+  expression_list[[file_name]] <- expr
+  metadata_list[[file_name]] <- meta
+  all_genes <- union(all_genes, colnames(expr)) 
+}
+```
+
+
+
+```{r}
+
+
+expression_list_padded <- lapply(expression_list, function(expr) {
+  missing_genes <- setdiff(all_genes, colnames(expr))
+  if (length(missing_genes) > 0) {
+    missing_df <- matrix(0, nrow = nrow(expr), ncol = length(missing_genes))
+    colnames(missing_df) <- missing_genes
+    expr <- cbind(expr, missing_df)
+  }
+  expr <- expr[, all_genes]  
+  return(expr)
+})
+
+
+combined_expr <- do.call(rbind, expression_list_padded)
+combined_meta <- do.call(rbind, metadata_list)
+
+rownames(combined_expr) <- combined_meta$cell_id
+rownames(combined_meta) <- combined_meta$cell_id
+
+combined_meta$cell_type[combined_meta$cell_type == "t_cell"] <- "T_cell"
+
+```
+
+### Save
+```{r}
+saveRDS(combined_expr, file = "C:/Users/Samuel/Downloads/combined_spiece_expression.rds")
+saveRDS(combined_meta, file = "C:/Users/Samuel/Downloads/combined_spiece_metadata.rds")
+```
+
+
+```{r}
+library(Seurat)
+
+
+library(Matrix)
+expr_sparse <- as(as.matrix(combined_expr), "dgCMatrix")
+rownames(expr_sparse) <- combined_meta$cell_id
+expr_sparse=t(expr_sparse)
+
+seurat_obj <- CreateSeuratObject(counts = expr_sparse, meta.data = combined_meta)
+
+saveRDS(seurat_obj, file = "C:/Users/Samuel/Downloads/seurat_combined.rds")
+```
+
+
+### loading into Seurat
+```{r}
+seurat_obj <- NormalizeData(seurat_obj)
+seurat_obj <- FindVariableFeatures(seurat_obj)
+seurat_obj <- ScaleData(seurat_obj)
+seurat_obj <- RunPCA(seurat_obj, npcs = 30)
+seurat_obj_UMAP <- RunUMAP(seurat_obj, dims = 1:30)
+seurat_obj_UMAP <- FindNeighbors(seurat_obj_UMAP, dims = 1:30)
+seurat_obj_UMAP <- FindClusters(seurat_obj_UMAP, resolution = 0.5)
+library(ggplot2)
+
+p1 <- DimPlot(seurat_obj_UMAP, reduction = "umap", group.by = "cell_type", label = FALSE) +
+  ggtitle("UMAP Colored by Cell Type")
+p2 <- DimPlot(seurat_obj_UMAP, reduction = "umap", group.by = "batch", label = FALSE) +
+  ggtitle("UMAP Colored by Dataset (species)")
+
+combined_plot <- p1 + p2
+combined_plot
+
+ggsave("D:/school_staff/CMML/ICA2/UMAP_Cross_species_raw.png", plot = combined_plot, width = 16, height = 7, dpi = 300)
+```
+
+### Seurat batch correction
+```{r}
+seurat_obj=readRDS("C:/Users/Samuel/Downloads/seurat_combined.rds")
+
+seurat_list <- SplitObject(seurat_obj, split.by = "batch")
+#  Normalize + HVG + Scale + PCA
+seurat_list <- lapply(seurat_list, function(obj) {
+  obj <- NormalizeData(obj)
+  obj <- FindVariableFeatures(obj)
+  obj <- ScaleData(obj)
+  obj <- RunPCA(obj, npcs = 30)
+  return(obj)
+})
+# anchors
+anchors <- FindIntegrationAnchors(object.list = seurat_list, dims = 1:30,reduction = "rpca",k.anchor = 10 )
+seurat_integrated <- IntegrateData(anchorset = anchors, dims = 1:30)
+
+library(ggplot2)
+seurat_integrated <- ScaleData(seurat_integrated)
+seurat_integrated <- RunPCA(seurat_integrated, npcs = 30)
+seurat_integrated <- RunUMAP(seurat_integrated, dims = 1:30)
+seurat_integrated <- FindNeighbors(seurat_integrated, dims = 1:30)
+seurat_integrated <- FindClusters(seurat_integrated, resolution = 0.5)
+
+p1 <- DimPlot(seurat_integrated, reduction = "umap", group.by = "cell_type", label = FALSE) +
+  ggtitle("UMAP Colored by Cell Type")
+p2 <- DimPlot(seurat_integrated, reduction = "umap", group.by = "batch", label = FALSE) +
+  ggtitle("UMAP Colored by Dataset (species)")
+
+combined_plot <- p1 + p2
+combined_plot
+
+ggsave("D:/school_staff/CMML/ICA2/UMAP_Cross_species_Seurat_RPCA.png", plot = combined_plot, width = 16, height = 7, dpi = 300)
+```
+
+
+### Creating cell line
+```{r}
+# 提取 species 信息（以 "-" 分隔，取第一个部分）
+seurat_integrated@meta.data$species <- substr(seurat_integrated@meta.data$cell_id,1,5)
+
+meta_data <- seurat_integrated@meta.data %>%
+  mutate(cell_id = colnames(seurat_integrated)) %>%
+  select(cell_id, batch, nFeature_RNA, cell_type,species)
+colnames(meta_data) <- c("cell_id", "dataset", "nGene", "cell_type","species")
+
+cell_lines <- list(
+  meta_data = meta_data,
+  scaled_pcs = Embeddings(seurat_integrated, "pca")
+)
+```
+
+
+
+
+### Creating cell line
+```{r}
+seurat_obj@meta.data$species <- substr(seurat_obj@meta.data$cell_id,1,5)
+meta_data <- seurat_obj@meta.data %>%
+  mutate(cell_id = colnames(seurat_obj)) %>%
+  select(cell_id, batch, nFeature_RNA, cell_type,species)
+colnames(meta_data) <- c("cell_id", "dataset", "nGene", "cell_type","species")
+
+cell_lines <- list(
+  meta_data = meta_data,
+  scaled_pcs = Embeddings(seurat_obj, "pca")
+)
+```
+
+
+
+
+
+
+

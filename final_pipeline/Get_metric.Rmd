@@ -1,0 +1,303 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+### Get 239T_Jurkat data
+
+**Your can get all the data of this section from the following linking:**
+
+"support.10xgenomics.com/single-cell-gene-expression/datasets/1.1.0/jurkat" "support.10xgenomics.com/single-cell-gene-expression/datasets/1.1.0/293t" "support.10xgenomics.com/single-cell-gene-expression/datasets/1.1.0/jurkat:293t_50:50"
+
+```{r}
+library(Matrix)
+library(Seurat)
+library(dplyr)
+setwd("Your_workpath")
+load_dataset <- function(mtx_path, genes_path, barcodes_path, dataset_name) {
+    counts <- readMM(mtx_path)
+    genes <- read.delim(genes_path, header = FALSE)
+    barcodes <- readLines(barcodes_path)
+    
+    genes$V2 <- gsub("_", "-", genes$V2)
+    rownames(counts) <- make.unique(genes$V2)
+    barcodes <- paste0(dataset_name, "_", barcodes) 
+    colnames(counts) <- barcodes
+    counts <- as(counts, "dgCMatrix")
+    
+    return(counts)
+}
+
+counts1 <- load_dataset("293t_filtered_gene_bc_matrices/matrix.mtx", "293t_filtered_gene_bc_matrices/genes.tsv", "293t_filtered_gene_bc_matrices/barcodes.tsv", "293t_filtered_gene_bc_matrices")
+counts2 <- load_dataset("jurkat_filtered_gene_bc_matrices/matrix.mtx", "jurkat_filtered_gene_bc_matrices/genes.tsv", "jurkat_filtered_gene_bc_matrices/barcodes.tsv", "jurkat_filtered_gene_bc_matrices")
+counts3 <- load_dataset("jurkat_293t_50_50_filtered_gene_bc_matrices/matrix.mtx", "jurkat_293t_50_50_filtered_gene_bc_matrices/genes.tsv", "jurkat_293t_50_50_filtered_gene_bc_matrices/barcodes.tsv", "jurkat_293t_50_50_filtered_gene_bc_matrices")
+
+# Build into one matrix
+common_genes <- Reduce(intersect, list(rownames(counts1), rownames(counts2), rownames(counts3)))
+counts1 <- counts1[common_genes, ]
+counts2 <- counts2[common_genes, ]
+counts3 <- counts3[common_genes, ]
+combined_counts <- cbind(counts1, counts2,counts3)
+
+# divide cell type by XIST 
+xist_expr <- combined_counts["XIST", ]
+cell_type <- ifelse(xist_expr > 0, "293T", "Jurkat")
+
+# get into meta_data
+seurat_obj <- CreateSeuratObject(counts = combined_counts)
+seurat_obj[["percent.mito"]] <- PercentageFeatureSet(seurat_obj, pattern = "^MT-")
+
+# add batch marker
+seurat_obj$dataset <- case_when(
+  grepl("^293t_filtered_", colnames(seurat_obj)) ~ "293T",
+  grepl("^jurkat_filtered_", colnames(seurat_obj)) ~ "Jurkat",
+  grepl("^jurkat_293t_50_50_", colnames(seurat_obj)) ~ "half"
+)
+
+# normalization
+seurat_obj <- NormalizeData(seurat_obj)
+seurat_obj <- FindVariableFeatures(seurat_obj)
+seurat_obj <- ScaleData(seurat_obj)
+seurat_obj <- RunPCA(seurat_obj, npcs = 30)
+
+#build cell_lines
+meta_data <- seurat_obj@meta.data %>%
+    mutate(cell_id = colnames(seurat_obj)) %>%
+    select(cell_id, dataset, nFeature_RNA)
+meta_data$cell_type <- cell_type
+colnames(meta_data) <- c("cell_id", "dataset", "nGene","cell_type")
+
+cell_lines <- list(
+    meta_data = meta_data,
+    scaled_pcs = Embeddings(seurat_obj, "pca")
+)
+
+```
+
+### Get PANC8 data
+
+Your can get the Panc8 by data by package **"SeuratData"** or get them from the Database (GSE81076, GSE85241, GSE86469, E-MTAB-5061)
+
+```{r}
+library(Seurat)
+#library(SeuratData)
+library(dplyr)
+library(ggplot2)
+
+data("panc8")
+# Update the data version into V5
+panc8 <- UpdateSeuratObject(panc8)
+
+table(panc8$tech)
+
+# Normalize → HVG → Scale → PCA
+panc8 <- NormalizeData(panc8, normalization.method = "LogNormalize", scale.factor = 10000)
+panc8 <- FindVariableFeatures(panc8, selection.method = "vst", nfeatures = 2000)
+panc8 <- ScaleData(panc8, features = VariableFeatures(panc8))
+panc8 <- RunPCA(panc8, npcs = 30)
+meta_data <- panc8@meta.data %>%
+    mutate(cell_id = colnames(panc8)) %>%
+    select(cell_id, dataset, nFeature_RNA)
+meta_data$cell_type <- panc8@meta.data$celltype
+colnames(meta_data) <- c("cell_id", "dataset", "nGene","cell_type")
+
+cell_lines <- list(
+    meta_data = meta_data,
+    scaled_pcs = Embeddings(panc8, "pca")
+)
+#check cell type
+table(cell_lines$meta_data$cell_type)
+```
+
+### UMAP
+
+```{r}
+library(uwot)
+# embedding <-t(harmonyObj$Z_cos) # harmonyobject
+
+# Load your file pathway
+#embedding <- read.csv("Data/embedding.csv", row.names = 1)
+#metadata = read.csv("Data/metadata.csv")
+
+embedding <- cell_lines$scaled_pcs
+meta <- cell_lines$meta_data
+rownames(embedding)=meta$cell_id
+
+#cell × PC matrix
+umap_res <- umap(embedding, n_neighbors = 30, min_dist = 0.3, metric = "cosine")
+umap_df <- as.data.frame(umap_res)
+colnames(umap_df) <- c("UMAP_1", "UMAP_2")
+umap_df$cell_id <- rownames(embedding)
+meta <- meta[match(umap_df$cell_id, meta$cell_id), ]
+plot_df <- merge(umap_df, meta, by = "cell_id", all.x = TRUE)
+
+library(ggplot2)
+
+label_positions <- plot_df %>%
+  group_by(cell_type) %>%
+  summarize(UMAP_1 = median(UMAP_1), UMAP_2 = median(UMAP_2))
+p1 <- ggplot(plot_df, aes(x = UMAP_1, y = UMAP_2, color = cell_type)) +
+  geom_point(size = 0.5, alpha = 0.8) +
+    geom_text_repel(data = label_positions, aes(label = cell_type), 
+                  color = "black", size = 4, fontface = "bold", show.legend = FALSE) +theme_classic()
+  ggtitle("Raw UMAP by Cell Type")
+
+p2 <- ggplot(plot_df, aes(x = UMAP_1, y = UMAP_2, color = dataset)) +
+  geom_point(size = 0.5, alpha = 0.8) +
+   theme_classic()+
+  ggtitle("Raw UMAP by Dataset")
+
+library(patchwork)
+p1 + p2
+combined_plot <- p1 + p2
+
+# save
+ggsave("Output/UMAP_of_XXXX.png", plot = combined_plot, width = 16, height = 7, dpi = 300)
+```
+
+### mean_iLISI & mean_cLISI
+
+```{r}
+library(lisi)
+library(ggplot2)
+# 1. scaled_pcs: PCA embedding matrix, rows are cells
+# 2. meta_data: data.frame with cell metadata, including 'batch' and 'cell_type'
+
+embedding <- cell_lines$scaled_pcs  # cell × PC matrix
+meta <- cell_lines$meta_data      # data.frame with 'dataset' and 'cell_type' columns
+
+meta <- meta[match(rownames(embedding), meta$cell_id), ]
+### change all "dataset" into "species" when benchmarking cross species
+lisi_scores <- compute_lisi(embedding, meta, c("dataset", "cell_type"))  
+
+#head(lisi_scores)
+
+mean_iLISI <- mean(lisi_scores$dataset)
+mean_cLISI <- mean(lisi_scores$cell_type)
+mean_cLISI
+mean_iLISI
+ggplot(lisi_scores, aes(x = dataset)) +
+  geom_density(adjust = 1) +  # 可选调节平滑程度
+  scale_x_continuous(limits = c(0 , 5)) + 
+  theme_classic()
+
+#ggsave("Output/density_plot_XXXX.png", width = 9, height = 2.5)
+
+
+```
+
+### silhouette
+
+```{r}
+library(cluster)
+embedding=cell_lines$scaled_pcs
+#embedding <-t(harmonyObj$Z_cos)
+labels <- cell_lines$meta_data$cell_type
+rownames(embedding)=cell_lines$meta_data$cell_id
+
+dist_matrix <- dist(embedding)
+
+
+label_numeric <- as.numeric(factor(labels))
+
+
+sil <- silhouette(label_numeric, dist_matrix)
+
+sil_scores <- sil[, "sil_width"]
+mean_sil <- mean(sil_scores)
+cat("Mean Silhouette Score (cell type):", round(mean_sil, 3), "\n")
+plot(sil, border = NA, col = label_numeric, main = "Silhouette plot by cell type")
+
+```
+
+### kNN graph connectivity
+
+```{r}
+library(FNN)
+library(dplyr)
+
+labels_dataset=cell_lines$meta_data$dataset
+embedding=cell_lines$scaled_pcs
+#embedding <-t(harmonyObj$Z_cos)
+rownames(embedding)=cell_lines$meta_data$cell_id
+meta <- cell_lines$meta_data
+
+# kNN
+k <- 30  # 可调参数
+knn_result <- get.knn(embedding, k = k)
+
+batch_mixing_score <- sapply(1:nrow(embedding), function(i) {
+  neighbors <- knn_result$nn.index[i, ]
+  own_batch <- labels_dataset[i]
+  neighbor_batches <- labels_dataset[neighbors]
+  mean(neighbor_batches != own_batch)
+})
+
+# get kNN connectivity 
+knn_connectivity <- mean(batch_mixing_score)
+
+cat("kNN Graph Connectivity Score:", round(knn_connectivity, 3), "\n")
+```
+
+### Entropy of Batch Mixing
+
+```{r}
+library(FNN)
+library(dplyr)
+
+meta <- cell_lines$meta_data
+batch_labels <- as.character(cell_lines$meta_data$dataset)
+names(batch_labels) <- cell_lines$meta_data$cell_id
+embedding <- as.matrix(cell_lines$scaled_pcs)
+#embedding <-t(harmonyObj$Z_cos) # cell × PC matrix
+rownames(embedding)=cell_lines$meta_data$cell_id
+
+k <- 30
+knn_result <- get.knn(embedding, k = k)
+
+compute_entropy <- function(neighbor_batches) {
+  tbl <- table(neighbor_batches) / length(neighbor_batches)
+  -sum(tbl * log2(tbl))
+}
+
+batch_entropy <- sapply(1:nrow(embedding), function(i) {
+  neighbor_indices <- knn_result$nn.index[i, ]
+  neighbor_batches <- batch_labels[neighbor_indices]
+  compute_entropy(neighbor_batches)
+})
+
+mean_entropy <- mean(batch_entropy)
+
+cat("Entropy of Batch Mixing (avg over all cells):", round(mean_entropy, 3), "\n")
+
+```
+
+### Isolated Label Score
+
+```{r}
+library(FNN)  
+pca_matrix=cell_lines$scaled_pcs # normal
+#pca_matrix <-t(harmonyObj$Z_cos) #harmony object
+rownames(pca_matrix)=cell_lines$meta_data$cell_id
+meta <- cell_lines$meta_data
+# get PCA embedding 
+
+k <- 30
+
+knn_result <- get.knn(pca_matrix, k = k)
+neighbor_index <- knn_result$nn.index 
+labels <- meta$cell_type
+
+#neighbor purity
+purity <- sapply(1:nrow(neighbor_index), function(i) {
+  neighbors <- neighbor_index[i, ]
+  mean(labels[neighbors] == labels[i])
+})
+meta$knn_purity <- purity
+
+isolated_label_score <- meta %>%
+  group_by(cell_type) %>%
+  summarise(isolated_score = mean(knn_purity))
+
+print(isolated_label_score)
+```

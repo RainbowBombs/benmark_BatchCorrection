@@ -1,0 +1,44 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+## You can borrow the data loading section from the file "Get_metric.Rmd"
+
+```{r}
+library(Seurat)
+library(dplyr)
+data("panc8")
+panc8 <- UpdateSeuratObject(panc8)
+seurat_list <- SplitObject(panc8, split.by = "tech")
+seurat_list <- lapply(seurat_list, NormalizeData)
+seurat_list <- lapply(seurat_list, FindVariableFeatures)
+
+# Integration
+anchors <- FindIntegrationAnchors(object.list = seurat_list, dims = 1:30)
+panc8_integrated <- IntegrateData(anchorset = anchors, dims = 1:30)
+DefaultAssay(panc8_integrated) <- "integrated"
+
+# Scale + PCA again on integrated assay
+panc8_integrated <- ScaleData(panc8_integrated)
+panc8_integrated <- RunPCA(panc8_integrated, npcs = 30)
+
+meta_data <- panc8_integrated@meta.data %>%
+  mutate(cell_id = colnames(panc8_integrated)) %>%
+  select(cell_id, tech, nFeature_RNA, celltype)
+colnames(meta_data) <- c("cell_id", "dataset", "nGene", "cell_type")
+
+seurat_corrected_cell_lines <- list(
+  meta_data = meta_data,
+  scaled_pcs = Embeddings(panc8_integrated, "pca")
+)
+```
+
+### Saving
+```{r}
+embedding <-seurat_corrected_cell_lines$scaled_pcs
+
+write.csv(embedding, file = "seurat_embedding.csv", quote = FALSE)
+write.csv(seurat_corrected_cell_lines$metadata, file = "seurat_metadata.csv", quote = FALSE, row.names = TRUE)
+
+```
