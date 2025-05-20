@@ -238,6 +238,23 @@ knn_connectivity <- mean(batch_mixing_score)
 
 cat("kNN Graph Connectivity Score:", round(knn_connectivity, 3), "\n")
 ```
+### kBET
+
+```{r}
+library(kBET)
+pca_matrix=cell_lines$scaled_pcs
+batch_labels=cell_lines$meta_data$dataset
+
+# pca_matrix: n_cells x n_PCs
+# batch_labels: factor of batch labels (e.g., "batch1", "batch2", ...)
+
+
+kbet_result <- kBET(pca_matrix, batch_labels, k0 = 30, plot = TRUE)
+
+mean(kbet_result$summary$kBET.observed)
+```
+
+
 
 ### Entropy of Batch Mixing
 
